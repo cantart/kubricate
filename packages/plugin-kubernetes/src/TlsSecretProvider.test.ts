@@ -264,65 +264,6 @@ describe('TlsSecretProvider', () => {
     });
   });
 
-  describe('getInjectionPayload() - envFrom strategy', () => {
-    it('should inject entire secret without prefix', () => {
-      const provider = new TlsSecretProvider({ name: 'ingress-tls' });
-
-      const injections = [
-        {
-          providerId: 'tls',
-          provider,
-          resourceId: 'deployment',
-          path: 'spec.template.spec.containers[0].envFrom',
-          meta: {
-            secretName: 'INGRESS_TLS',
-            targetName: 'INGRESS_TLS', // Required by type even for envFrom
-            strategy: { kind: 'envFrom' as const },
-          },
-        },
-      ];
-
-      const payload = provider.getInjectionPayload(injections);
-
-      expect(payload).toEqual([
-        {
-          secretRef: {
-            name: 'ingress-tls',
-          },
-        },
-      ]);
-    });
-
-    it('should inject entire secret with prefix', () => {
-      const provider = new TlsSecretProvider({ name: 'ingress-tls' });
-
-      const injections = [
-        {
-          providerId: 'tls',
-          provider,
-          resourceId: 'deployment',
-          path: 'spec.template.spec.containers[0].envFrom',
-          meta: {
-            secretName: 'INGRESS_TLS',
-            targetName: 'INGRESS_TLS', // Required by type even for envFrom
-            strategy: { kind: 'envFrom' as const, prefix: 'TLS_' },
-          },
-        },
-      ];
-
-      const payload = provider.getInjectionPayload(injections);
-
-      expect(payload).toEqual([
-        {
-          prefix: 'TLS_',
-          secretRef: {
-            name: 'ingress-tls',
-          },
-        },
-      ]);
-    });
-  });
-
   describe('getTargetPath()', () => {
     it('should return correct path for env strategy', () => {
       const provider = new TlsSecretProvider({ name: 'ingress-tls' });
@@ -338,22 +279,6 @@ describe('TlsSecretProvider', () => {
       const path = provider.getTargetPath({ kind: 'env', containerIndex: 2 });
 
       expect(path).toBe('spec.template.spec.containers[2].env');
-    });
-
-    it('should return correct path for envFrom strategy', () => {
-      const provider = new TlsSecretProvider({ name: 'ingress-tls' });
-
-      const path = provider.getTargetPath({ kind: 'envFrom', containerIndex: 0 });
-
-      expect(path).toBe('spec.template.spec.containers[0].envFrom');
-    });
-
-    it('should return correct path for envFrom strategy with custom container index', () => {
-      const provider = new TlsSecretProvider({ name: 'ingress-tls' });
-
-      const path = provider.getTargetPath({ kind: 'envFrom', containerIndex: 1 });
-
-      expect(path).toBe('spec.template.spec.containers[1].envFrom');
     });
 
     it('should use custom targetPath if provided', () => {
@@ -374,6 +299,9 @@ describe('TlsSecretProvider', () => {
       expect(() => {
         provider.getTargetPath({ kind: 'annotation' } as any);
       }).toThrow(/Unsupported injection strategy/);
+      expect(() => {
+        provider.getTargetPath({ kind: 'annotation' } as any);
+      }).toThrow(/TLS secret keys.*contain dots/);
     });
   });
 
@@ -521,12 +449,12 @@ describe('TlsSecretProvider', () => {
   });
 
   describe('supportedStrategies', () => {
-    it('should support env and envFrom strategies', () => {
+    it('should support only env strategy (envFrom not supported)', () => {
       const provider = new TlsSecretProvider({ name: 'ingress-tls' });
 
       expect(provider.supportedStrategies).toContain('env');
-      expect(provider.supportedStrategies).toContain('envFrom');
-      expect(provider.supportedStrategies).toHaveLength(2);
+      expect(provider.supportedStrategies).not.toContain('envFrom');
+      expect(provider.supportedStrategies).toHaveLength(1);
     });
   });
 
@@ -551,112 +479,11 @@ describe('TlsSecretProvider', () => {
   });
 
   describe('Strategy Validation', () => {
-    describe('Mixed Strategy Validation', () => {
-      it('should throw error when env and envFrom strategies are mixed', () => {
+    describe('envFrom Not Supported', () => {
+      it('should throw error when envFrom strategy is used', () => {
         const provider = new TlsSecretProvider({ name: 'test-tls', namespace: 'default' });
 
-        const mixedInjections: ProviderInjection[] = [
-          {
-            providerId: 'tls',
-            provider,
-            resourceId: 'deployment',
-            path: 'spec.template.spec.containers[0].customPath',
-            meta: {
-              secretName: 'TLS1',
-              targetName: 'TLS_CERT',
-              strategy: { kind: 'env', key: 'tls.crt' },
-            },
-          },
-          {
-            providerId: 'tls',
-            provider,
-            resourceId: 'deployment',
-            path: 'spec.template.spec.containers[0].customPath',
-            meta: {
-              secretName: 'TLS2',
-              targetName: 'TLS2',
-              strategy: { kind: 'envFrom', prefix: 'TLS_' },
-            },
-          },
-        ];
-
-        expect(() => provider.getInjectionPayload(mixedInjections)).toThrow(
-          /mixed injection strategies are not allowed/i
-        );
-        expect(() => provider.getInjectionPayload(mixedInjections)).toThrow(/env, envFrom/);
-      });
-
-      it('should include helpful context in error message', () => {
-        const provider = new TlsSecretProvider({ name: 'test-tls', namespace: 'default' });
-
-        const mixedInjections: ProviderInjection[] = [
-          {
-            providerId: 'tls',
-            provider,
-            resourceId: 'deployment',
-            path: 'spec.template.spec.containers[0].env',
-            meta: {
-              secretName: 'TLS1',
-              targetName: 'TLS_CERT',
-              strategy: { kind: 'env', key: 'tls.crt' },
-            },
-          },
-          {
-            providerId: 'tls',
-            provider,
-            resourceId: 'deployment',
-            path: 'spec.template.spec.containers[0].env',
-            meta: {
-              secretName: 'TLS2',
-              targetName: 'TLS2',
-              strategy: { kind: 'envFrom' },
-            },
-          },
-        ];
-
-        expect(() => provider.getInjectionPayload(mixedInjections)).toThrow(/framework bug or incorrect targetPath/i);
-      });
-    });
-
-    describe('envFrom Prefix Validation', () => {
-      it('should throw error when multiple different prefixes are used', () => {
-        const provider = new TlsSecretProvider({ name: 'shared-tls', namespace: 'default' });
-
-        const conflictingInjections: ProviderInjection[] = [
-          {
-            providerId: 'tls',
-            provider,
-            resourceId: 'deployment',
-            path: 'spec.template.spec.containers[0].envFrom',
-            meta: {
-              secretName: 'INGRESS_TLS',
-              targetName: 'INGRESS_TLS',
-              strategy: { kind: 'envFrom', prefix: 'INGRESS_' },
-            },
-          },
-          {
-            providerId: 'tls',
-            provider,
-            resourceId: 'deployment',
-            path: 'spec.template.spec.containers[0].envFrom',
-            meta: {
-              secretName: 'API_TLS',
-              targetName: 'API_TLS',
-              strategy: { kind: 'envFrom', prefix: 'API_' },
-            },
-          },
-        ];
-
-        expect(() => provider.getInjectionPayload(conflictingInjections)).toThrow(
-          /multiple envFrom prefixes detected/i
-        );
-        expect(() => provider.getInjectionPayload(conflictingInjections)).toThrow(/INGRESS_, API_/);
-      });
-
-      it('should throw error when mixing prefixed and non-prefixed envFrom', () => {
-        const provider = new TlsSecretProvider({ name: 'shared-tls', namespace: 'default' });
-
-        const conflictingInjections: ProviderInjection[] = [
+        const envFromInjections: ProviderInjection[] = [
           {
             providerId: 'tls',
             provider,
@@ -665,88 +492,13 @@ describe('TlsSecretProvider', () => {
             meta: {
               secretName: 'TLS1',
               targetName: 'TLS1',
-              strategy: { kind: 'envFrom', prefix: 'TLS_' },
-            },
-          },
-          {
-            providerId: 'tls',
-            provider,
-            resourceId: 'deployment',
-            path: 'spec.template.spec.containers[0].envFrom',
-            meta: {
-              secretName: 'TLS2',
-              targetName: 'TLS2',
-              strategy: { kind: 'envFrom' },
+              strategy: { kind: 'envFrom' as any },
             },
           },
         ];
 
-        expect(() => provider.getInjectionPayload(conflictingInjections)).toThrow(
-          /multiple envFrom prefixes detected/i
-        );
-        expect(() => provider.getInjectionPayload(conflictingInjections)).toThrow(/\(none\)/);
-      });
-
-      it('should accept multiple envFrom injections with same prefix', () => {
-        const provider = new TlsSecretProvider({ name: 'test-tls', namespace: 'default' });
-
-        const validInjections: ProviderInjection[] = [
-          {
-            providerId: 'tls',
-            provider,
-            resourceId: 'deployment',
-            path: 'spec.template.spec.containers[0].envFrom',
-            meta: {
-              secretName: 'TLS1',
-              targetName: 'TLS1',
-              strategy: { kind: 'envFrom', prefix: 'TLS_' },
-            },
-          },
-          {
-            providerId: 'tls',
-            provider,
-            resourceId: 'deployment',
-            path: 'spec.template.spec.containers[0].envFrom',
-            meta: {
-              secretName: 'TLS2',
-              targetName: 'TLS2',
-              strategy: { kind: 'envFrom', prefix: 'TLS_' },
-            },
-          },
-        ];
-
-        expect(() => provider.getInjectionPayload(validInjections)).not.toThrow();
-      });
-
-      it('should accept multiple envFrom injections with no prefix (undefined)', () => {
-        const provider = new TlsSecretProvider({ name: 'test-tls', namespace: 'default' });
-
-        const validInjections: ProviderInjection[] = [
-          {
-            providerId: 'tls',
-            provider,
-            resourceId: 'deployment',
-            path: 'spec.template.spec.containers[0].envFrom',
-            meta: {
-              secretName: 'TLS1',
-              targetName: 'TLS1',
-              strategy: { kind: 'envFrom' },
-            },
-          },
-          {
-            providerId: 'tls',
-            provider,
-            resourceId: 'deployment',
-            path: 'spec.template.spec.containers[0].envFrom',
-            meta: {
-              secretName: 'TLS2',
-              targetName: 'TLS2',
-              strategy: { kind: 'envFrom' },
-            },
-          },
-        ];
-
-        expect(() => provider.getInjectionPayload(validInjections)).not.toThrow();
+        expect(() => provider.getInjectionPayload(envFromInjections)).toThrow(/Only 'env' injection is supported/i);
+        expect(() => provider.getInjectionPayload(envFromInjections)).toThrow(/TLS secret keys.*contain dots/i);
       });
     });
 
@@ -812,7 +564,8 @@ describe('TlsSecretProvider', () => {
         },
       ];
 
-      expect(() => provider.getInjectionPayload(injections)).toThrow(/Unsupported strategy kind/);
+      expect(() => provider.getInjectionPayload(injections)).toThrow(/Only 'env' injection is supported/i);
+      expect(() => provider.getInjectionPayload(injections)).toThrow(/TLS secret keys.*contain dots/i);
     });
 
     it('should use custom targetPath for env strategy', () => {
@@ -825,18 +578,6 @@ describe('TlsSecretProvider', () => {
       });
 
       expect(path).toBe('custom.path.to.env');
-    });
-
-    it('should use custom targetPath for envFrom strategy', () => {
-      const provider = new TlsSecretProvider({ name: 'ingress-tls' });
-
-      const path = provider.getTargetPath({
-        kind: 'envFrom',
-        containerIndex: 0,
-        targetPath: 'custom.path.to.envFrom',
-      });
-
-      expect(path).toBe('custom.path.to.envFrom');
     });
 
     it('should infer env strategy from path without .envFrom', () => {
@@ -885,29 +626,6 @@ describe('TlsSecretProvider', () => {
       expect(() => {
         provider.getInjectionPayload(injections);
       }).toThrow(/key.*is required/i);
-    });
-
-    it('should infer envFrom strategy from path with .envFrom', () => {
-      const provider = new TlsSecretProvider({ name: 'ingress-tls' });
-
-      const injections: ProviderInjection[] = [
-        {
-          providerId: 'tls',
-          provider,
-          resourceId: 'deployment',
-          path: 'spec.template.spec.containers[0].envFrom',
-          meta: {
-            secretName: 'INGRESS_TLS',
-            targetName: 'INGRESS_TLS',
-            // No strategy provided - will be inferred from path
-          },
-        },
-      ];
-
-      const payload = provider.getInjectionPayload(injections);
-
-      expect(payload).toHaveLength(1);
-      expect((payload as any)[0].secretRef).toBeDefined();
     });
   });
 });

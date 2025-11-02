@@ -10,7 +10,6 @@ import type {
   SecretValue,
 } from '@kubricate/core';
 
-import type { EnvFromSource } from './BasicAuthSecretProvider.js';
 import type { EnvVar } from './kubernetes-types.js';
 import { createKubernetesMergeHandler } from './merge-utils.js';
 import { parseZodSchema } from './utils.js';
@@ -33,12 +32,16 @@ export interface TlsSecretProviderConfig {
   namespace?: string;
 }
 
-type SupportedStrategies = 'env' | 'envFrom';
+type SupportedStrategies = 'env';
 type SuppoertedEnvKeys = 'tls.crt' | 'tls.key';
 
 /**
  * TlsSecretProvider is a provider that uses Kubernetes TLS secrets.
- * It supports both individual key injection (env) and bulk injection (envFrom).
+ * It supports only individual key injection (env) because TLS secret keys
+ * (tls.crt, tls.key) contain dots which are invalid in environment variable names.
+ *
+ * envFrom is NOT supported because it would create invalid environment variables
+ * like `tls.crt=<value>` which causes runtime failures in containers.
  *
  * The kubernetes.io/tls Secret type has fixed keys: tls.crt and tls.key.
  *
@@ -53,7 +56,7 @@ export class TlsSecretProvider
   name: string | undefined;
   logger?: BaseLogger;
   readonly targetKind = 'Deployment';
-  readonly supportedStrategies: SupportedStrategies[] = ['env', 'envFrom'];
+  readonly supportedStrategies: SupportedStrategies[] = ['env'];
   readonly supportedEnvKeys: SuppoertedEnvKeys[] = ['tls.crt', 'tls.key'];
 
   constructor(public config: TlsSecretProviderConfig) {}
@@ -67,15 +70,11 @@ export class TlsSecretProvider
       return `spec.template.spec.containers[${index}].env`;
     }
 
-    if (strategy.kind === 'envFrom') {
-      if (strategy.targetPath) {
-        return strategy.targetPath;
-      }
-      const index = strategy.containerIndex ?? 0;
-      return `spec.template.spec.containers[${index}].envFrom`;
-    }
-
-    throw new Error(`[TlsSecretProvider] Unsupported injection strategy: ${strategy.kind}`);
+    throw new Error(
+      `[TlsSecretProvider] Unsupported injection strategy: ${strategy.kind}. ` +
+        `Only 'env' injection is supported because TLS secret keys (tls.crt, tls.key) ` +
+        `contain dots which are invalid in environment variable names.`
+    );
   }
 
   getEffectIdentifier(effect: PreparedEffect): string {
@@ -86,68 +85,40 @@ export class TlsSecretProvider
   /**
    * Get injection payload for Kubernetes manifests.
    *
-   * This method routes to the appropriate handler based on the injection strategy kind.
-   * All injections in the array MUST use the same strategy kind (homogeneity requirement).
+   * Only supports 'env' strategy for individual key injection.
+   * envFrom is not supported because TLS secret keys (tls.crt, tls.key) contain dots
+   * which are invalid in environment variable names.
    *
-   * @param injectes Array of provider injections. Must all use the same strategy kind.
-   * @returns Array of environment variables (for 'env' strategy) or envFrom sources (for 'envFrom' strategy)
+   * @param injectes Array of provider injections. Must all use 'env' strategy.
+   * @returns Array of environment variables
    *
-   * @throws {Error} If mixed injection strategies are detected (e.g., both 'env' and 'envFrom')
-   * @throws {Error} If multiple envFrom prefixes are detected for the same provider
-   * @throws {Error} If an unsupported strategy kind is encountered
+   * @throws {Error} If an unsupported strategy kind is encountered (e.g., 'envFrom')
    *
    * @example
-   * // Valid: All env strategy
+   * // Valid: env strategy with individual keys
    * const envPayload = provider.getInjectionPayload([
-   *   { meta: { strategy: { kind: 'env', key: 'tls.crt' } } },
-   *   { meta: { strategy: { kind: 'env', key: 'tls.key' } } }
+   *   { meta: { strategy: { kind: 'env', key: 'tls.crt' }, targetName: 'TLS_CERT' } },
+   *   { meta: { strategy: { kind: 'env', key: 'tls.key' }, targetName: 'TLS_KEY' } }
    * ]);
-   *
-   * @example
-   * // Valid: All envFrom with same prefix
-   * const envFromPayload = provider.getInjectionPayload([
-   *   { meta: { strategy: { kind: 'envFrom', prefix: 'TLS_' } } },
-   *   { meta: { strategy: { kind: 'envFrom', prefix: 'TLS_' } } }
-   * ]);
-   *
-   * @example
-   * // Invalid: Mixed strategies (throws error)
-   * provider.getInjectionPayload([
-   *   { meta: { strategy: { kind: 'env' } } },
-   *   { meta: { strategy: { kind: 'envFrom' } } }
-   * ]); // Throws error
    */
-  getInjectionPayload(injectes: ProviderInjection[]): EnvVar[] | EnvFromSource[] {
+  getInjectionPayload(injectes: ProviderInjection[]): EnvVar[] {
     if (injectes.length === 0) {
       return [];
     }
 
-    // VALIDATION: Ensure all injections use the same strategy kind
+    // VALIDATION: Ensure all injections use 'env' strategy
     const firstStrategy = this.extractStrategy(injectes[0]);
-    const mixedStrategies = injectes.filter(inject => {
-      const strategy = this.extractStrategy(inject);
-      return strategy.kind !== firstStrategy.kind;
-    });
 
-    if (mixedStrategies.length > 0) {
-      const kinds = injectes.map(i => this.extractStrategy(i).kind);
-      const uniqueKinds = [...new Set(kinds)].join(', ');
+    if (firstStrategy.kind !== 'env') {
       throw new Error(
-        `[TlsSecretProvider] Mixed injection strategies are not allowed. ` +
-          `Expected all injections to use '${firstStrategy.kind}' but found: ${uniqueKinds}. ` +
-          `This is likely a framework bug or incorrect targetPath configuration.`
+        `[TlsSecretProvider] Only 'env' injection is supported. ` +
+          `Attempted to use '${firstStrategy.kind}' which is not allowed because ` +
+          `TLS secret keys (tls.crt, tls.key) contain dots which are invalid in environment variable names. ` +
+          `Use individual key injection with .forName() instead.`
       );
     }
 
-    if (firstStrategy.kind === 'env') {
-      return this.getEnvInjectionPayload(injectes);
-    }
-
-    if (firstStrategy.kind === 'envFrom') {
-      return this.getEnvFromInjectionPayload(injectes);
-    }
-
-    throw new Error(`[TlsSecretProvider] Unsupported strategy kind: ${firstStrategy.kind}`);
+    return this.getEnvInjectionPayload(injectes);
   }
 
   private extractStrategy(inject: ProviderInjection): SecretInjectionStrategy {
@@ -195,53 +166,6 @@ export class TlsSecretProvider
         },
       };
     });
-  }
-
-  private getEnvFromInjectionPayload(injectes: ProviderInjection[]): EnvFromSource[] {
-    // VALIDATION: Ensure all injections use envFrom strategy
-    const invalidInjections = injectes.filter(inject => {
-      const strategy = this.extractStrategy(inject);
-      return strategy.kind !== 'envFrom';
-    });
-
-    if (invalidInjections.length > 0) {
-      throw new Error(
-        `[TlsSecretProvider] Mixed injection strategies detected in envFrom handler. ` +
-          `All injections must use 'envFrom' strategy. ` +
-          `Found ${invalidInjections.length} injection(s) with different strategy.`
-      );
-    }
-
-    // VALIDATION: Check for conflicting prefixes
-    const prefixes = new Set<string | undefined>();
-    injectes.forEach(inject => {
-      const strategy = this.extractStrategy(inject);
-      if (strategy.kind === 'envFrom') {
-        prefixes.add(strategy.prefix);
-      }
-    });
-
-    if (prefixes.size > 1) {
-      const prefixList = Array.from(prefixes)
-        .map(p => p || '(none)')
-        .join(', ');
-      throw new Error(
-        `[TlsSecretProvider] Multiple envFrom prefixes detected: ${prefixList}. ` +
-          `All envFrom injections for the same secret must use the same prefix.`
-      );
-    }
-
-    const firstStrategy = this.extractStrategy(injectes[0]);
-    const prefix = firstStrategy.kind === 'envFrom' ? firstStrategy.prefix : undefined;
-
-    return [
-      {
-        ...(prefix && { prefix }),
-        secretRef: {
-          name: this.config.name,
-        },
-      },
-    ];
   }
 
   /**

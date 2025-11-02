@@ -20,23 +20,10 @@ export const secretManager = new SecretManager()
       namespace: config.namespace,
     })
   )
-  // Provider for API service mTLS certificate
-  .addProvider(
-    'ApiTlsProvider',
-    new TlsSecretProvider({
-      name: 'api-tls',
-      namespace: config.namespace,
-    })
-  )
   .setDefaultConnector('EnvConnector')
   .setDefaultProvider('IngressTlsProvider')
   // Add TLS certificate for ingress controller
   .addSecret({
     name: 'INGRESS_TLS',
     provider: 'IngressTlsProvider',
-  })
-  // Add TLS certificate for API service
-  .addSecret({
-    name: 'API_TLS',
-    provider: 'ApiTlsProvider',
   });

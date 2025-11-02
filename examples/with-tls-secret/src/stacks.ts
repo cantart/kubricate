@@ -12,10 +12,15 @@ const namespace = Stack.fromTemplate(namespaceTemplate, {
 });
 
 /**
- * Example 1: Using env injection with individual keys
+ * Ingress Controller with TLS Certificate
  *
  * This demonstrates injecting TLS certificate and key as separate
- * environment variables using the 'key' parameter.
+ * environment variables using individual key injection.
+ *
+ * Note: envFrom cannot be used with TLS secrets because the standard
+ * Kubernetes TLS secret keys (tls.crt, tls.key) contain dots, which
+ * are invalid characters in environment variable names. This would
+ * cause runtime failures in containers.
  */
 const ingressControllerApp = Stack.fromTemplate(simpleAppTemplate, {
   namespace: config.namespace,
@@ -47,63 +52,7 @@ const ingressControllerApp = Stack.fromTemplate(simpleAppTemplate, {
     },
   });
 
-/**
- * Example 2: Using envFrom injection with prefix
- *
- * This demonstrates bulk injection of TLS material using envFrom.
- * The prefix ensures no naming conflicts with other environment variables.
- */
-const apiGatewayApp = Stack.fromTemplate(simpleAppTemplate, {
-  namespace: config.namespace,
-  imageName: 'api-gateway',
-  name: 'api-gateway',
-})
-  .useSecrets(secretManager, c => {
-    // Inject all TLS material with TLS_ prefix
-    // Results in: TLS_tls.crt and TLS_tls.key
-    c.secrets('API_TLS').inject('envFrom', { prefix: 'TLS_' });
-  })
-  .override({
-    service: {
-      apiVersion: 'v1',
-      kind: 'Service',
-      spec: {
-        type: 'ClusterIP',
-        ports: [
-          {
-            port: 8443,
-            targetPort: 8443,
-            protocol: 'TCP',
-            name: 'https',
-          },
-        ],
-      },
-    },
-  });
-
-/**
- * Example 3: Using envFrom without prefix
- *
- * Demonstrates bulk injection without prefix.
- * Results in environment variables: tls.crt and tls.key
- */
-const sidecarProxyApp = Stack.fromTemplate(simpleAppTemplate, {
-  namespace: config.namespace,
-  imageName: 'envoy-proxy',
-  name: 'sidecar-proxy',
-})
-  .useSecrets(secretManager, c => {
-    // Inject all TLS material without prefix
-    c.secrets('INGRESS_TLS').inject('envFrom');
-  })
-  .override({
-    // Remove service from sidecar proxy (not needed)
-    service: undefined,
-  });
-
 export default {
   namespace,
   ingressControllerApp,
-  apiGatewayApp,
-  sidecarProxyApp,
 };

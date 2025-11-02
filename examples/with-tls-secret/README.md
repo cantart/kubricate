@@ -4,68 +4,78 @@ This example demonstrates how to use **TlsSecretProvider** to manage `kubernetes
 
 ## 📖 Overview
 
-This example shows three different patterns for using TlsSecretProvider:
+This example shows how to inject TLS certificates and private keys as environment variables using **individual key injection** with the `env` strategy.
 
-1. **Individual key injection** - Inject `tls.crt` and `tls.key` as separate environment variables
-2. **Bulk injection with prefix** - Use `envFrom` to inject both certificate and key with a prefix
-3. **Bulk injection without prefix** - Use `envFrom` to inject TLS material directly
+### ⚠️ Important: envFrom Not Supported
 
-> **Note**: While TLS certificates are typically mounted as volumes in production environments, this example demonstrates environment variable injection for scenarios where that's required or preferred.
+**TlsSecretProvider does NOT support `envFrom` (bulk injection)**. Only individual key injection with `env` is supported.
+
+**Why?** The Kubernetes `kubernetes.io/tls` secret type uses fixed key names `tls.crt` and `tls.key`, which contain **dots**. Dots are **invalid characters in environment variable names**, causing runtime failures when containers attempt to start.
+
+```typescript
+// ❌ NOT SUPPORTED - Would create invalid env vars
+c.secrets('TLS').inject('envFrom');
+// Would result in: tls.crt=<value>, tls.key=<value> (INVALID!)
+
+// ✅ CORRECT - Individual key injection with valid env var names
+c.secrets('TLS').forName('TLS_CERT').inject('env', { key: 'tls.crt' });
+c.secrets('TLS').forName('TLS_KEY').inject('env', { key: 'tls.key' });
+// Results in: TLS_CERT=<value>, TLS_KEY=<value> (valid)
+```
+
+### Production Note
+
+While this example demonstrates environment variable injection for educational purposes, **production deployments should mount TLS certificates as volumes** for better security. Volume mounting support is planned for future releases.
 
 ## 🏗️ What's Included
 
 ### Stacks
 
-- **namespace** - Default namespace
-- **ingressControllerApp** - Ingress controller using individual env injection (`env` with `key`)
-- **apiGatewayApp** - API gateway using bulk injection with prefix (`envFrom` with `prefix`)
-- **sidecarProxyApp** - Sidecar proxy using bulk injection without prefix (`envFrom`)
+- **namespace** - Namespace (`kubricate-with-tls-secret`)
+- **ingressControllerApp** - Ingress controller with TLS certificate injected as environment variables
 
 ### Features Demonstrated
 
 - ✅ `kubernetes.io/tls` Secret type generation
-- ✅ Individual key selection with `inject('env', { key: 'tls.crt' })`
-- ✅ Bulk injection with `inject('envFrom', { prefix: 'TLS_' })`
-- ✅ Type-safe TLS certificate management
-- ✅ Multiple deployment patterns in one example
+- ✅ Individual key injection with `.inject('env', { key: 'tls.crt' })`
+- ✅ Custom environment variable naming with `.forName()`
+- ✅ Type-safe TLS certificate management from `.env` file
 
 ## 🚀 Quick Start
 
 ### 1. Setup Environment Variables
 
-Copy the example environment file and customize it:
+Copy the example environment file:
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env` to set your TLS certificates:
+Edit `.env` to set your TLS certificate (or use the example values for testing):
 
 ```bash
 # Ingress TLS Certificate
 INGRESS_TLS={"cert":"-----BEGIN CERTIFICATE-----\\n...\\n-----END CERTIFICATE-----","key":"-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----"}
-
-# API TLS Certificate
-API_TLS={"cert":"-----BEGIN CERTIFICATE-----\\n...\\n-----END CERTIFICATE-----","key":"-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----"}
 ```
+
+**Format requirements:**
+- PEM-encoded certificate and private key
+- Newlines must be escaped as `\\n` in JSON
+- Use the `cert` and `key` fields
 
 ### 2. Generate Kubernetes Manifests
-
-Run the following command to generate resources:
-
-```bash
-pnpm --filter=@examples/with-tls-secret kubricate generate
-```
-
-Or from the example directory:
 
 ```bash
 pnpm kbr generate
 ```
 
-### 3. Review Generated Resources
+Or from the monorepo root:
 
-Check the `output/` directory for generated YAML files:
+```bash
+pnpm --filter=@examples/with-tls-secret kubricate generate
+```
+
+### 3. Review Generated Resources
 
 ```bash
 ls -la output/
@@ -73,27 +83,64 @@ ls -la output/
 
 You should see:
 - `namespace.yml` - Namespace definition
-- `ingressControllerApp.yml` - Ingress controller with individual env vars
-- `apiGatewayApp.yml` - API gateway with prefixed env vars
-- `sidecarProxyApp.yml` - Sidecar proxy with direct env vars
+- `ingressControllerApp.yml` - Deployment and Service with TLS secrets injected
 
-## 📋 Generated Resources Explained
+## 📋 How It Works
 
-### Ingress Controller (Individual Key Injection)
+### Secret Configuration
 
-The ingress controller uses **individual key injection** to set specific environment variable names:
+The TLS secret is configured in `src/setup-secrets.ts`:
 
 ```typescript
-c.secrets('INGRESS_TLS')
-  .forName('TLS_CERT')
-  .inject('env', { key: 'tls.crt' });
-
-c.secrets('INGRESS_TLS')
-  .forName('TLS_KEY')
-  .inject('env', { key: 'tls.key' });
+export const secretManager = new SecretManager()
+  .addConnector('EnvConnector', new EnvConnector())
+  .addProvider(
+    'IngressTlsProvider',
+    new TlsSecretProvider({
+      name: 'ingress-tls',
+      namespace: config.namespace,
+    })
+  )
+  .setDefaultConnector('EnvConnector')
+  .setDefaultProvider('IngressTlsProvider')
+  .addSecret({
+    name: 'INGRESS_TLS',
+    provider: 'IngressTlsProvider',
+  });
 ```
 
-**Generated YAML**:
+### Stack with Secret Injection
+
+The ingress controller stack in `src/stacks.ts` injects the TLS certificate and key:
+
+```typescript
+const ingressControllerApp = Stack.fromTemplate(simpleAppTemplate, {
+  namespace: config.namespace,
+  imageName: 'nginx',
+  name: 'ingress-controller',
+})
+  .useSecrets(secretManager, c => {
+    // Inject certificate as TLS_CERT environment variable
+    c.secrets('INGRESS_TLS').forName('TLS_CERT').inject('env', { key: 'tls.crt' });
+
+    // Inject private key as TLS_KEY environment variable
+    c.secrets('INGRESS_TLS').forName('TLS_KEY').inject('env', { key: 'tls.key' });
+  })
+  .override({
+    service: {
+      apiVersion: 'v1',
+      kind: 'Service',
+      spec: {
+        type: 'LoadBalancer',
+        ports: [{ port: 443, targetPort: 443, protocol: 'TCP', name: 'https' }],
+      },
+    },
+  });
+```
+
+### Generated Kubernetes Resources
+
+**Secret:**
 ```yaml
 apiVersion: v1
 kind: Secret
@@ -104,7 +151,10 @@ type: kubernetes.io/tls
 data:
   tls.crt: <base64-encoded-certificate>
   tls.key: <base64-encoded-private-key>
----
+```
+
+**Deployment with Environment Variables:**
+```yaml
 apiVersion: apps/v1
 kind: Deployment
 spec:
@@ -125,132 +175,45 @@ spec:
               key: tls.key
 ```
 
-### API Gateway (Bulk Injection with Prefix)
-
-The API gateway uses **envFrom with prefix** for bulk injection:
-
-```typescript
-c.secrets('API_TLS').inject('envFrom', { prefix: 'TLS_' });
-```
-
-**Generated YAML**:
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-spec:
-  template:
-    spec:
-      containers:
-      - name: api-gateway
-        envFrom:
-        - prefix: TLS_
-          secretRef:
-            name: api-tls
-```
-
-**Resulting Environment Variables**:
-- `TLS_tls.crt=<certificate-value>`
-- `TLS_tls.key=<key-value>`
-
-### Sidecar Proxy (Bulk Injection without Prefix)
-
-The sidecar proxy uses **envFrom without prefix**:
-
-```typescript
-c.secrets('INGRESS_TLS').inject('envFrom');
-```
-
-**Resulting Environment Variables**:
-- `tls.crt=<certificate-value>`
-- `tls.key=<key-value>`
+Note how the secret keys `tls.crt` and `tls.key` (with dots) are mapped to valid environment variable names `TLS_CERT` and `TLS_KEY` (without dots).
 
 ## 🔐 Secret Management
 
-### Format
+### Input Format
 
-TlsSecretProvider expects secrets in JSON format with `cert` and `key` fields containing PEM-encoded data:
+TlsSecretProvider expects JSON with `cert` and `key` fields:
 
 ```json
 {
-  "cert": "-----BEGIN CERTIFICATE-----\\nMIID...\\n-----END CERTIFICATE-----",
-  "key": "-----BEGIN PRIVATE KEY-----\\nMIIE...\\n-----END PRIVATE KEY-----"
+  "cert": "-----BEGIN CERTIFICATE-----\\n...\\n-----END CERTIFICATE-----",
+  "key": "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----"
 }
 ```
 
-**Important Notes**:
+**Requirements:**
 - Certificates and keys must be in PEM format
-- Newlines in PEM data must be escaped as `\\n` in JSON
-- The provider will automatically base64-encode the values for Kubernetes
+- Newlines must be escaped as `\\n` when stored in `.env`
+- The provider automatically base64-encodes values for Kubernetes
 
-### Loading Secrets
+### Multiple TLS Secrets
 
-In this example, secrets are loaded from `.env` file using `EnvConnector`:
+To manage multiple TLS certificates, create separate provider instances:
 
 ```typescript
-export const secretManager = new SecretManager()
-  .addConnector('EnvConnector', new EnvConnector())
-  // Provider for ingress TLS certificate
+new SecretManager()
   .addProvider('IngressTlsProvider', new TlsSecretProvider({
     name: 'ingress-tls',
-    namespace: 'default',
+    namespace: 'production',
   }))
-  // Provider for API service mTLS certificate
   .addProvider('ApiTlsProvider', new TlsSecretProvider({
     name: 'api-tls',
-    namespace: 'default',
+    namespace: 'production',
   }))
-  .setDefaultConnector('EnvConnector')
-  .setDefaultProvider('IngressTlsProvider')
-  .addSecret({
-    name: 'INGRESS_TLS',
-    provider: 'IngressTlsProvider',
-  })
-  .addSecret({
-    name: 'API_TLS',
-    provider: 'ApiTlsProvider',
-  });
+  .addSecret({ name: 'INGRESS_TLS', provider: 'IngressTlsProvider' })
+  .addSecret({ name: 'API_TLS', provider: 'ApiTlsProvider' });
 ```
 
-### Why Separate Providers?
-
-**Important**: Each `TlsSecretProvider` instance manages a **single Kubernetes Secret resource**. When you need to create multiple TLS secrets with different certificates, you must use separate provider instances.
-
-**❌ Incorrect - Using one provider for multiple secrets**:
-```typescript
-// This will cause a conflict!
-.addProvider('TlsSecretProvider', new TlsSecretProvider({
-  name: 'ingress-tls',  // Single Secret resource
-}))
-.addSecret({ name: 'INGRESS_TLS' })  // cert + key
-.addSecret({ name: 'API_TLS' })       // cert + key (CONFLICT!)
-```
-
-**Error**: `[conflict:k8s] Conflict detected: key "tls.crt" already exists in Secret "ingress-tls"`
-
-**Why it fails**: Both secrets try to write `tls.crt` and `tls.key` keys into the same Secret resource (`ingress-tls`), causing a key collision.
-
-**✅ Correct - Separate provider for each secret**:
-```typescript
-// Each provider creates its own Secret resource
-.addProvider('IngressTlsProvider', new TlsSecretProvider({
-  name: 'ingress-tls',     // Secret 1
-}))
-.addProvider('ApiTlsProvider', new TlsSecretProvider({
-  name: 'api-tls',          // Secret 2
-}))
-.addSecret({ name: 'INGRESS_TLS', provider: 'IngressTlsProvider' })
-.addSecret({ name: 'API_TLS', provider: 'ApiTlsProvider' })
-```
-
-**Result**: Two separate Kubernetes Secrets are created:
-- `ingress-tls` with ingress certificate/key
-- `api-tls` with API certificate/key
-
-**Key Takeaway**: Unlike `OpaqueSecretProvider` which can merge multiple secrets into one resource, `TlsSecretProvider` has a **fixed schema** (`tls.crt` + `tls.key`), so you need one provider instance per certificate.
-
-### Validation
-
-TlsSecretProvider validates that secrets contain both `cert` and `key` fields. Invalid secrets will fail at build time with clear error messages.
+**Why separate providers?** Each `TlsSecretProvider` instance creates a single Kubernetes Secret resource. Since the `kubernetes.io/tls` type has a fixed schema (`tls.crt` + `tls.key`), you need one provider per certificate to avoid key collisions.
 
 ## 🎯 Use Cases
 
@@ -264,50 +227,66 @@ This pattern is useful for:
 
 ## 📚 Key Concepts
 
-### Individual Key Injection (`env`)
+### Why Only Individual Key Injection?
 
-When you need **granular control** over environment variable names:
+TlsSecretProvider restricts injection to the `env` strategy for a critical reason:
+
+**The Problem:**
+- Kubernetes `kubernetes.io/tls` secrets must have keys named `tls.crt` and `tls.key`
+- These key names contain **dots** (`.`)
+- Environment variable names **cannot contain dots** - they're invalid characters
+- Using `envFrom` would create env vars like `tls.crt=<value>` which causes **runtime failures**
+
+**The Solution:**
+- Use `.forName()` to specify a **valid** env var name (e.g., `TLS_CERT`)
+- Use `.inject('env', { key: 'tls.crt' })` to reference the **secret key** with the dot
+- This maps `tls.crt` → `TLS_CERT`, avoiding the invalid character
+
+### Individual Key Injection Syntax
 
 ```typescript
-.inject('env', { key: 'tls.crt' })  // Select specific key
-.forName('CUSTOM_ENV_NAME')          // Set custom env var name
+c.secrets('INGRESS_TLS')
+  .forName('TLS_CERT')              // ← Valid env var name (no dots)
+  .inject('env', { key: 'tls.crt' }); // ← Secret key (has dots)
 ```
 
-**Required**:
-- ✅ Must use `.forName()` to specify environment variable name
-- ✅ Must provide `key` parameter ('tls.crt' or 'tls.key')
-
-### Bulk Injection (`envFrom`)
-
-When you want to **inject all TLS material** at once:
-
-```typescript
-.inject('envFrom')                    // No prefix
-.inject('envFrom', { prefix: 'TLS_' }) // With prefix
-```
-
-**Optional**:
-- 🔧 `prefix` adds a prefix to all environment variables
+**Required:**
+- ✅ Must use `.forName()` to specify the environment variable name
+- ✅ Must provide `key` parameter: `'tls.crt'` or `'tls.key'`
 
 ## 🧪 Testing the Example
 
-### 1. Validate Configuration
+### 1. Generate Manifests
 
 ```bash
 pnpm kbr generate
 ```
 
-### 2. Check Generated Secrets
+### 2. Verify Secret Generation
 
 ```bash
-cat output/ingressControllerApp.yml | grep -A 5 "kind: Secret"
+cat output/ingressControllerApp.yml | grep -A 6 "kind: Secret"
+```
+
+Expected output:
+```yaml
+kind: Secret
+metadata:
+  name: ingress-tls
+  namespace: kubricate-with-tls-secret
+type: kubernetes.io/tls
+data:
+  tls.crt: ...
+  tls.key: ...
 ```
 
 ### 3. Verify Environment Variables
 
 ```bash
-cat output/ingressControllerApp.yml | grep -A 10 "env:"
+cat output/ingressControllerApp.yml | grep -A 12 "env:"
 ```
+
+You should see `TLS_CERT` and `TLS_KEY` (not `tls.crt` and `tls.key`).
 
 ## 🔍 Troubleshooting
 
@@ -317,11 +296,16 @@ cat output/ingressControllerApp.yml | grep -A 10 "env:"
 Error: [TlsSecretProvider] Missing targetName (.forName) for env injection.
 ```
 
-**Solution**: Add `.forName('ENV_VAR_NAME')` before `.inject()`:
+**Cause:** Forgot to specify `.forName()` before `.inject()`
 
+**Solution:**
 ```typescript
+// ❌ Wrong
+c.secrets('INGRESS_TLS').inject('env', { key: 'tls.crt' });
+
+// ✅ Correct
 c.secrets('INGRESS_TLS')
-  .forName('TLS_CERT')  // ← Add this
+  .forName('TLS_CERT')
   .inject('env', { key: 'tls.crt' });
 ```
 
@@ -331,114 +315,76 @@ c.secrets('INGRESS_TLS')
 Error: [TlsSecretProvider] Invalid key 'ca.crt'. Must be 'tls.crt' or 'tls.key'.
 ```
 
-**Solution**: Use only `'tls.crt'` or `'tls.key'` as key values:
+**Cause:** Using a key name other than `tls.crt` or `tls.key`
 
+**Solution:** Only use the two valid TLS secret keys:
 ```typescript
-.inject('env', { key: 'tls.crt' })  // ✅ Correct
-.inject('env', { key: 'ca.crt' })    // ❌ Invalid
+.inject('env', { key: 'tls.crt' })  // ✅ Valid
+.inject('env', { key: 'tls.key' })  // ✅ Valid
+.inject('env', { key: 'ca.crt' })   // ❌ Invalid
 ```
 
-### Error: Missing key
+### Error: Missing key parameter
 
 ```
 Error: [TlsSecretProvider] 'key' is required for env injection.
 ```
 
-**Solution**: Provide the `key` parameter:
+**Cause:** Not providing the `key` parameter to specify which secret key to inject
 
+**Solution:**
 ```typescript
-.inject('env', { key: 'tls.crt' })  // ✅ Correct
-.inject('env')                       // ❌ Missing key
+// ❌ Wrong
+.inject('env')
+
+// ✅ Correct
+.inject('env', { key: 'tls.crt' })
+```
+
+### Error: envFrom not supported
+
+```
+Error: [TlsSecretProvider] Only 'env' injection is supported.
+Attempted to use 'envFrom' which is not allowed because TLS secret keys
+(tls.crt, tls.key) contain dots which are invalid in environment variable names.
+```
+
+**Cause:** Attempting to use `envFrom` for bulk injection
+
+**Solution:** Use individual key injection instead:
+```typescript
+// ❌ Wrong - envFrom not supported
+c.secrets('TLS').inject('envFrom');
+c.secrets('TLS').inject('envFrom', { prefix: 'TLS_' });
+
+// ✅ Correct - individual key injection
+c.secrets('TLS').forName('TLS_CERT').inject('env', { key: 'tls.crt' });
+c.secrets('TLS').forName('TLS_KEY').inject('env', { key: 'tls.key' });
 ```
 
 ### Error: Conflict detected
 
 ```
-Error: [conflict:k8s] Conflict detected: key "tls.crt" already exists in Secret "ingress-tls" in namespace "default"
+Error: [conflict:k8s] Conflict detected: key "tls.crt" already exists in Secret "ingress-tls"
 ```
 
-**Cause**: Multiple secrets are trying to use the same provider instance, which creates a single Kubernetes Secret resource. Since `kubernetes.io/tls` secrets only have `tls.crt` and `tls.key` keys, trying to merge multiple certificates into one Secret causes conflicts.
+**Cause:** Multiple secrets trying to use the same provider instance
 
-**Solution**: Create separate provider instances for each certificate:
-
+**Solution:** Create separate provider instances for each certificate:
 ```typescript
-// ❌ Wrong - reusing same provider
-.addProvider('TlsSecretProvider', new TlsSecretProvider({
-  name: 'ingress-tls'
-}))
+// ❌ Wrong
+.addProvider('TlsProvider', new TlsSecretProvider({ name: 'ingress-tls' }))
 .addSecret({ name: 'INGRESS_TLS' })
 .addSecret({ name: 'API_TLS' })  // Conflict!
 
-// ✅ Correct - separate providers
-.addProvider('IngressTlsProvider', new TlsSecretProvider({
-  name: 'ingress-tls'
-}))
-.addProvider('ApiTlsProvider', new TlsSecretProvider({
-  name: 'api-tls'
-}))
+// ✅ Correct
+.addProvider('IngressTlsProvider', new TlsSecretProvider({ name: 'ingress-tls' }))
+.addProvider('ApiTlsProvider', new TlsSecretProvider({ name: 'api-tls' }))
 .addSecret({ name: 'INGRESS_TLS', provider: 'IngressTlsProvider' })
 .addSecret({ name: 'API_TLS', provider: 'ApiTlsProvider' })
 ```
 
-See the [Why Separate Providers?](#why-separate-providers) section for more details.
-
-### Error: Mixed injection strategies
-
-```
-Error: [TlsSecretProvider] Mixed injection strategies are not allowed.
-Expected all injections to use 'env' but found: env, envFrom.
-```
-
-**Cause**: Attempting to use both `env` and `envFrom` strategies with the same provider and custom `targetPath` that causes them to be grouped together.
-
-**Solution**: Don't mix strategies. Use either `env` OR `envFrom`, not both:
-
-```typescript
-// ❌ Wrong - mixing strategies
-c.secrets('TLS')
-  .forName('CERT')
-  .inject('env', { key: 'tls.crt', targetPath: 'custom.path' });
-c.secrets('TLS')
-  .inject('envFrom', { prefix: 'TLS_', targetPath: 'custom.path' });
-
-// ✅ Correct - use only one strategy
-c.secrets('TLS')
-  .forName('CERT')
-  .inject('env', { key: 'tls.crt' });
-c.secrets('TLS')
-  .forName('KEY')
-  .inject('env', { key: 'tls.key' });
-```
-
-### Error: Multiple envFrom prefixes detected
-
-```
-Error: [TlsSecretProvider] Multiple envFrom prefixes detected: INGRESS_, API_.
-All envFrom injections for the same secret must use the same prefix.
-```
-
-**Cause**: Trying to use different prefixes for envFrom injections to the same provider instance.
-
-**Why this happens**: Each provider instance represents **one** Kubernetes Secret. That secret can only be injected with **one** prefix value.
-
-**Solution**: Use separate provider instances for different secrets:
-
-```typescript
-// ❌ Wrong - different prefixes for same provider
-.addProvider('TlsProvider', new TlsSecretProvider({ name: 'shared-tls' }))
-c.secrets('INGRESS_TLS').inject('envFrom', { prefix: 'INGRESS_' });
-c.secrets('API_TLS').inject('envFrom', { prefix: 'API_' });
-
-// ✅ Correct - separate providers for different secrets
-.addProvider('IngressProvider', new TlsSecretProvider({ name: 'ingress-tls' }))
-.addProvider('ApiProvider', new TlsSecretProvider({ name: 'api-tls' }))
-c.secrets('INGRESS_TLS', { provider: 'IngressProvider' }).inject('envFrom', { prefix: 'INGRESS_' });
-c.secrets('API_TLS', { provider: 'ApiProvider' }).inject('envFrom', { prefix: 'API_' });
-```
-
 ## 📖 Documentation
-
-For more information about secret management in Kubricate:
 
 - [Official Documentation](https://kubricate.thaitype.dev)
 - [Secret Management Guide](../../docs/secrets.md)
@@ -446,14 +392,15 @@ For more information about secret management in Kubricate:
 
 ## 🤝 Related Examples
 
-- [with-basic-auth-secret](../with-basic-auth-secret) - BasicAuth secret management example
-- [with-secret-manager](../with-secret-manager) - General secret management example
+- [with-basic-auth-secret](../with-basic-auth-secret) - BasicAuth secret management
+- [with-custom-type-secret](../with-custom-type-secret) - Custom secret types
+- [with-secret-manager](../with-secret-manager) - General secret management
 - [with-stack-template](../with-stack-template) - Basic stack creation
 
 ## 📝 Notes
 
 - TlsSecretProvider is part of `@kubricate/plugin-kubernetes` package
-- Certificates and keys are base64-encoded automatically
-- The Secret type `kubernetes.io/tls` is a Kubernetes built-in type
-- This provider enforces Kubernetes spec compliance (tls.crt + tls.key only)
-- **Production Note**: While this example uses environment variables, production deployments typically mount TLS certificates as volumes for better security
+- Certificates and keys are automatically base64-encoded by Kubernetes
+- The `kubernetes.io/tls` secret type is a Kubernetes built-in type with fixed schema
+- **envFrom is NOT supported** - only `env` injection works due to dot characters in key names
+- **Production recommendation:** Mount TLS certificates as volumes instead of environment variables for better security (volume mounting support coming in future releases)
