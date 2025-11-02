@@ -109,10 +109,18 @@ export class InMemoryFileSystem implements IFileSystem {
 
     // If it's a directory
     if (this.directories.has(normalized)) {
+      // Prevent removal of root directory
+      if (normalized === '/') {
+        throw new Error(`EPERM: operation not permitted, rmdir '${p}'`);
+      }
+
+      // Calculate prefix for child detection (handle root correctly)
+      const prefix = normalized === '/' ? '/' : normalized + '/';
+
       // Check if recursive is required
       const hasChildren =
-        Array.from(this.files.keys()).some(f => f.startsWith(normalized + '/')) ||
-        Array.from(this.directories).some(d => d.startsWith(normalized + '/') && d !== normalized);
+        Array.from(this.files.keys()).some(f => f.startsWith(prefix)) ||
+        Array.from(this.directories).some(d => d.startsWith(prefix) && d !== normalized);
 
       if (hasChildren && !options?.recursive) {
         throw new Error(`ENOTEMPTY: directory not empty, rmdir '${p}'`);
@@ -122,14 +130,14 @@ export class InMemoryFileSystem implements IFileSystem {
       if (options?.recursive) {
         // Remove all files under this directory
         for (const filePath of Array.from(this.files.keys())) {
-          if (filePath.startsWith(normalized + '/')) {
+          if (filePath.startsWith(prefix)) {
             this.files.delete(filePath);
           }
         }
 
         // Remove all subdirectories
         for (const dirPath of Array.from(this.directories)) {
-          if (dirPath.startsWith(normalized + '/')) {
+          if (dirPath.startsWith(prefix)) {
             this.directories.delete(dirPath);
           }
         }

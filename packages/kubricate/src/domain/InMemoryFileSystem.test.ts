@@ -182,6 +182,67 @@ describe('InMemoryFileSystem', () => {
       const fs = new InMemoryFileSystem();
       expect(() => fs.remove('/nonexistent', { recursive: true, force: true })).not.toThrow();
     });
+
+    describe('root directory protection', () => {
+      it('should prevent removal of root directory', () => {
+        const fs = new InMemoryFileSystem();
+        expect(() => fs.remove('/')).toThrow('EPERM');
+        expect(() => fs.remove('/')).toThrow(/operation not permitted/i);
+      });
+
+      it('should prevent recursive removal of root directory', () => {
+        const fs = new InMemoryFileSystem();
+        fs.mkdir('/foo/bar', { recursive: true });
+        fs.writeFile('/foo/bar/file.txt', 'content');
+        fs.writeFile('/root-file.txt', 'root content');
+
+        expect(() => fs.remove('/', { recursive: true })).toThrow('EPERM');
+
+        // Verify filesystem is not corrupted - all files should still exist
+        expect(fs.exists('/')).toBe(true);
+        expect(fs.exists('/foo')).toBe(true);
+        expect(fs.exists('/foo/bar')).toBe(true);
+        expect(fs.exists('/foo/bar/file.txt')).toBe(true);
+        expect(fs.exists('/root-file.txt')).toBe(true);
+      });
+
+      it('should correctly detect children at root level', () => {
+        const fs = new InMemoryFileSystem();
+        fs.mkdir('/dir1', { recursive: true });
+        fs.mkdir('/dir2/subdir', { recursive: true });
+        fs.writeFile('/file.txt', 'content');
+
+        // Verify all root-level children exist
+        const rootEntries = fs.readdir('/');
+        expect(rootEntries).toContain('dir1');
+        expect(rootEntries).toContain('dir2');
+        expect(rootEntries).toContain('file.txt');
+      });
+
+      it('should not affect sibling directories at root level', () => {
+        const fs = new InMemoryFileSystem();
+        fs.mkdir('/dir1/sub1', { recursive: true });
+        fs.mkdir('/dir2/sub2', { recursive: true });
+        fs.writeFile('/dir1/sub1/file1.txt', 'content1');
+        fs.writeFile('/dir2/sub2/file2.txt', 'content2');
+
+        // Remove one root-level directory
+        fs.remove('/dir1', { recursive: true });
+
+        // Verify only dir1 was removed
+        expect(fs.exists('/dir1')).toBe(false);
+        expect(fs.exists('/dir1/sub1')).toBe(false);
+        expect(fs.exists('/dir1/sub1/file1.txt')).toBe(false);
+
+        // dir2 should be unaffected
+        expect(fs.exists('/dir2')).toBe(true);
+        expect(fs.exists('/dir2/sub2')).toBe(true);
+        expect(fs.exists('/dir2/sub2/file2.txt')).toBe(true);
+
+        // Root should still exist
+        expect(fs.exists('/')).toBe(true);
+      });
+    });
   });
 
   describe('readdir', () => {
